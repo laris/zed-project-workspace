@@ -1,0 +1,24 @@
+[package]
+name = "zed-prj-workspace-hook"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Frida-Gum cdylib injected into Zed for event-driven workspace sync"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed-prj-workspace = { path = ".." }
+dylib-hook-registry = { path = "../../dylib-kit/crates/dylib-hook-registry" }
+frida-gum = { git = "https://github.com/frida/frida-rust", features = ["auto-download", "invocation-listener"] }
+ctor = "0.6"
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
