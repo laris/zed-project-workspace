@@ -185,6 +185,130 @@ pub fn discover_workspace_target() -> Result<Option<(PathBuf, i64)>, Box<dyn std
     }
 }
 
+/// Discover the workspace file for a specific workspace_id.
+///
+/// Unlike `discover_workspace_target()` which uses LIMIT 1, this queries the
+/// specific workspace_id captured from sqlite3_bind_int64. Runs the same
+/// priority chain (project_name → legacy mapping → scan → bootstrap).
+///
+/// Also updates WORKSPACE_TARGET for picker_sort compatibility.
+pub fn discover_for_workspace_id(
+    workspace_id: i64,
+) -> Result<Option<(PathBuf, i64)>, Box<dyn std::error::Error>> {
+    let db_path = match ZED_DB_PATH.get() {
+        Some(Some(path)) => path,
+        _ => return Ok(None),
+    };
+
+    // Query this specific workspace_id from the DB
+    let reader = zed_prj_workspace::workspace_db::ZedDbReader::open(db_path)?;
+    let record = match reader.find_by_id(workspace_id)? {
+        Some(r) => r,
+        None => {
+            tracing::debug!("workspace_id={} not found in DB", workspace_id);
+            return Ok(None);
+        }
+    };
+
+    let folder_roots = record.ordered_paths();
+    if folder_roots.is_empty() {
+        return Ok(None);
+    }
+
+    tracing::info!(
+        "discover_for_workspace_id({}): roots={:?}",
+        workspace_id,
+        folder_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Priority 0: Check project_name in .zed/settings.json
+    for root in &folder_roots {
+        if let Some(raw) = zed_prj_workspace::settings::read_project_name(root) {
+            let (id_opt, name) = zed_prj_workspace::settings::parse_project_name(&raw);
+            if let Some(id) = id_opt {
+                let ws_file = zed_prj_workspace::settings::workspace_file_for_name(root, &name);
+                if ws_file.exists() {
+                    tracing::info!(
+                        "discover_for_workspace_id({}): found via project_name '{}' in {}",
+                        workspace_id, raw, root.display()
+                    );
+                    // Update project_name if workspace_id changed
+                    if id != workspace_id {
+                        let new_pn =
+                            zed_prj_workspace::settings::format_project_name(workspace_id, &name);
+                        let _ = zed_prj_workspace::settings::write_project_name(root, &new_pn);
+                        tracing::info!("Updated project_name: {} → {}", raw, new_pn);
+                    }
+                    zed_prj_workspace::mapping::cleanup_legacy_mapping(root);
+
+                    // Update WORKSPACE_TARGET for picker_sort compat
+                    update_workspace_target_cached(&ws_file, workspace_id);
+
+                    return Ok(Some((ws_file, workspace_id)));
+                }
+            }
+        }
+    }
+
+    // Priority 1: Check legacy mapping files
+    for root in &folder_roots {
+        if let Some(mapping) = zed_prj_workspace::mapping::WorkspaceMapping::read(root) {
+            let ws_path = mapping.resolve_workspace_file(root);
+            if ws_path.exists() {
+                tracing::info!(
+                    "discover_for_workspace_id({}): found via mapping in {}",
+                    workspace_id, root.display()
+                );
+                update_workspace_target_cached(&ws_path, workspace_id);
+                return Ok(Some((ws_path, workspace_id)));
+            }
+        }
+    }
+
+    // Priority 2: Scan for *.code-workspace files
+    let candidates = find_workspace_files_in_roots(&folder_roots);
+    if candidates.len() == 1 {
+        let _ = write_zed_settings_for_roots(workspace_id, &candidates[0], &folder_roots);
+        update_workspace_target_cached(&candidates[0], workspace_id);
+        return Ok(Some((candidates[0].clone(), workspace_id)));
+    }
+    if candidates.len() > 1 {
+        let mut sorted = candidates;
+        sorted.sort();
+        let _ = write_zed_settings_for_roots(workspace_id, &sorted[0], &folder_roots);
+        update_workspace_target_cached(&sorted[0], workspace_id);
+        return Ok(Some((sorted[0].clone(), workspace_id)));
+    }
+
+    // Priority 3: Bootstrap
+    match bootstrap_workspace(workspace_id, &folder_roots) {
+        Ok(path) => {
+            update_workspace_target_cached(&path, workspace_id);
+            Ok(Some((path, workspace_id)))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Bootstrap failed for workspace_id={}: {}",
+                workspace_id, e
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Update the cached WORKSPACE_TARGET and install picker sort target name.
+fn update_workspace_target_cached(ws_file: &PathBuf, workspace_id: i64) {
+    *WORKSPACE_TARGET.write().unwrap() = Some((ws_file.clone(), workspace_id));
+
+    // Set picker sort target name if available
+    if let Some(name) = ws_file.file_stem().and_then(|n| n.to_str()) {
+        crate::try_deferred_picker_install(name);
+    }
+}
+
 /// Query the most recently written workspace entry from Zed's DB.
 fn query_latest_workspace(
     db_path: &Path,

@@ -66,6 +66,16 @@ fn init_inner() {
 
     tracing::info!("Found sqlite3_prepare_v2 at {:?}", prepare_ptr);
 
+    // Find sqlite3_bind_int64 for per-window workspace_id capture
+    let bind_ptr = symbols::find_sqlite3_bind_int64(gum, &main_module);
+    if let Some(ref ptr) = bind_ptr {
+        tracing::info!("Found sqlite3_bind_int64 at {:?}", ptr);
+    } else {
+        tracing::warn!(
+            "Cannot find sqlite3_bind_int64 — falling back to LIMIT 1 discovery"
+        );
+    }
+
     // Determine app_id for registry
     let app_id = zed_prj_workspace::mapping::detect_zed_channel()
         .map(|ch| format!("zed-{ch}"))
@@ -106,6 +116,11 @@ fn init_inner() {
 
     let mut interceptor = Interceptor::obtain(gum);
     hooks::sqlite3_prepare::install(&mut interceptor, prepare_ptr);
+
+    // Install bind_int64 hook for per-window workspace_id capture
+    if let Some(ptr) = bind_ptr {
+        hooks::sqlite3_bind::install(&mut interceptor, ptr);
+    }
 
     // Install picker sort hook eagerly (if symbol found).
     // The detour is a no-op when target name is null, so it's safe to install
@@ -184,6 +199,7 @@ fn register_in_registry(app_id: &str) {
         .with_version(env!("CARGO_PKG_VERSION"))
         .with_features(&["workspace-sync", "code-workspace-file", "mapping-file", "picker-pin"])
         .with_symbol("sqlite3_prepare_v2", "replace", "Detect workspace write SQL → sync to .code-workspace")
+        .with_symbol("sqlite3_bind_int64", "replace", "Capture workspace_id from bound parameters")
         .with_symbol("OpenFolderEntry_sort_comparator", "replace", "Pin target folder to top of project picker")
         .with_load_order(2);
 

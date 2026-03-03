@@ -7,7 +7,7 @@
 //! - File locking via shared `lock` module
 //! - Self-write detection via mapping `last_sync_ts`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,11 +23,20 @@ use crate::hooks::sqlite3_prepare::{TARGET_PENDING, TARGET_SET, TARGET_STATE};
 static DEBOUNCE_MAP: Mutex<Option<HashMap<i64, Instant>>> = Mutex::new(None);
 
 /// Whether a sync is already pending (prevents spawning duplicate sync threads).
+/// Used by legacy path only.
 static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Whether the target root needs to be re-pinned at index 0 after sync.
 /// Set during sync if target root is not first; acted on after sync completes.
 static NEEDS_REPIN: AtomicBool = AtomicBool::new(false);
+
+// ---- Queue-based multi-workspace sync (new path, driven by bind_int64 hook) ----
+
+/// Work queue of workspace_ids needing sync.
+static SYNC_QUEUE: Mutex<Option<VecDeque<i64>>> = Mutex::new(None);
+
+/// Whether the drain thread is running.
+static DRAIN_RUNNING: AtomicBool = AtomicBool::new(false);
 
 
 /// Called when a workspace write query is detected.
@@ -64,6 +73,152 @@ pub fn on_workspace_write_detected(_sql: &str, state: u8) {
         tracing::debug!("Sync already pending, coalescing this event");
     }
 }
+
+// ---- Queue-based sync entry point (new path) ----
+
+/// Enqueue a workspace_id for sync. Called from the bind_int64 hook.
+///
+/// Deduplicates: if the same workspace_id is already queued, this is a no-op.
+/// Spawns the drain thread if not already running.
+pub fn enqueue_workspace_sync(workspace_id: i64) {
+    {
+        let mut guard = SYNC_QUEUE.lock().unwrap();
+        let queue = guard.get_or_insert_with(VecDeque::new);
+
+        // Deduplicate
+        if queue.contains(&workspace_id) {
+            tracing::debug!("workspace_id={} already queued, coalescing", workspace_id);
+            return;
+        }
+
+        queue.push_back(workspace_id);
+        tracing::info!(
+            "Enqueued workspace_id={} (queue_len={})",
+            workspace_id,
+            queue.len()
+        );
+    }
+
+    // Spawn drain thread if not running
+    if DRAIN_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
+        std::thread::spawn(drain_sync_queue);
+    }
+}
+
+/// Drain the sync queue: process each workspace_id sequentially.
+fn drain_sync_queue() {
+    // Initial delay: wait for Zed's transaction to commit
+    std::thread::sleep(SYNC_DELAY);
+
+    loop {
+        let workspace_id = {
+            let mut guard = SYNC_QUEUE.lock().unwrap();
+            let queue = guard.get_or_insert_with(VecDeque::new);
+            queue.pop_front()
+        };
+
+        match workspace_id {
+            Some(wid) => {
+                tracing::debug!("Processing queued workspace_id={}", wid);
+                process_workspace_sync(wid);
+            }
+            None => {
+                // Queue is empty, stop the drain thread
+                DRAIN_RUNNING.store(false, Ordering::Release);
+
+                // Double-check: items may have been added between pop_front and store
+                let has_more = {
+                    let guard = SYNC_QUEUE.lock().unwrap();
+                    guard.as_ref().is_some_and(|q| !q.is_empty())
+                };
+                if has_more
+                    && DRAIN_RUNNING
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Process sync for a specific workspace_id (new path).
+fn process_workspace_sync(workspace_id: i64) {
+    // Per-workspace_id cooldown check
+    {
+        let mut map = DEBOUNCE_MAP.lock().unwrap();
+        let map = map.get_or_insert_with(HashMap::new);
+        if let Some(last) = map.get(&workspace_id) {
+            if last.elapsed() < SYNC_COOLDOWN {
+                tracing::debug!(
+                    "Per-workspace cooldown active for workspace_id={}, skipping",
+                    workspace_id
+                );
+                return;
+            }
+        }
+    }
+
+    // Resolve workspace file for this workspace_id
+    let (ws_file_path, wid) = match discovery::discover_for_workspace_id(workspace_id) {
+        Ok(Some(target)) => target,
+        Ok(None) => {
+            tracing::debug!("No workspace file for workspace_id={}", workspace_id);
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Discovery failed for workspace_id={}: {}",
+                workspace_id, e
+            );
+            return;
+        }
+    };
+
+    tracing::debug!(
+        "Sync target for workspace_id={}: {}",
+        wid,
+        ws_file_path.display()
+    );
+
+    // Check file still exists
+    if !ws_file_path.exists() {
+        tracing::warn!("Workspace file disappeared: {}", ws_file_path.display());
+        return;
+    }
+
+    match do_event_driven_sync(&ws_file_path, wid) {
+        Ok(synced) => {
+            if synced {
+                tracing::info!("Sync completed for workspace_id={} — file modified", wid);
+            } else {
+                tracing::debug!("Sync completed for workspace_id={} — no changes", wid);
+            }
+            // Update per-workspace cooldown
+            let mut map = DEBOUNCE_MAP.lock().unwrap();
+            let map = map.get_or_insert_with(HashMap::new);
+            map.insert(wid, Instant::now());
+        }
+        Err(e) => {
+            tracing::warn!("Sync failed for workspace_id={}: {}", wid, e);
+        }
+    }
+
+    // Check if pinning needed
+    if NEEDS_REPIN
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
+        run_pinning(&ws_file_path, wid);
+    }
+}
+
+// ---- Legacy single-target sync (fallback when bind hook unavailable) ----
 
 /// Run workspace discovery (first-time or re-discovery).
 fn run_discovery() {

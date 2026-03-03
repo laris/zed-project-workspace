@@ -74,7 +74,21 @@ unsafe extern "C" fn prepare_v2_detour(
         && let Ok(sql_str) = unsafe { CStr::from_ptr(z_sql) }.to_str()
             && is_workspace_write(sql_str) {
                 tracing::debug!("SQL matched workspace write filter (len={})", sql_str.len());
-                crate::sync::on_workspace_write_detected(sql_str, state);
+
+                if crate::hooks::sqlite3_bind::is_installed() {
+                    // Record the statement pointer so bind_int64 hook can capture workspace_id.
+                    // pp_stmt points to the sqlite3_stmt* that was just prepared.
+                    if !pp_stmt.is_null() {
+                        let stmt_ptr = unsafe { *pp_stmt };
+                        if !stmt_ptr.is_null() {
+                            crate::hooks::sqlite3_bind::PENDING_WORKSPACE_STMT
+                                .store(stmt_ptr, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                } else {
+                    // Legacy path: bind hook not available, use LIMIT 1 discovery
+                    crate::sync::on_workspace_write_detected(sql_str, state);
+                }
             }
 
     result

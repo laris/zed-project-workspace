@@ -61,3 +61,17 @@ pub fn find_sqlite3_prepare_v2(gum: &Gum, main_module: &Module) -> Option<Native
             sys_module.find_export_by_name("sqlite3_prepare_v2")
         })
 }
+
+/// Find sqlite3_bind_int64 in the main binary or system libsqlite3.
+///
+/// Same search strategy as sqlite3_prepare_v2: main binary first,
+/// then system dylib fallback.
+pub fn find_sqlite3_bind_int64(gum: &Gum, main_module: &Module) -> Option<NativePointer> {
+    main_module
+        .find_export_by_name("sqlite3_bind_int64")
+        .or_else(|| {
+            tracing::info!("sqlite3_bind_int64 not in main binary, trying libsqlite3.dylib");
+            let sys_module = Module::load(gum, "libsqlite3.dylib");
+            sys_module.find_export_by_name("sqlite3_bind_int64")
+        })
+}
