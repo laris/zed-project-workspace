@@ -1,13 +1,16 @@
 {
   "folders": [
     {
+      "path": "../dylib-kit"
+    },
+    {
       "path": "."
     },
     {
       "path": "../zed-yolo-hook"
     },
     {
-      "path": "../dylib-kit"
+      "path": "../../codes-repos/gh-zed-industries__zed"
     }
   ]
 }
