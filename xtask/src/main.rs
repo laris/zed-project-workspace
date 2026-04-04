@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result, bail};
 use dylib_hook_registry::{HealthCheck, HookEntry};
-use dylib_patcher::{HookProject, Patcher, TargetApp};
+use dylib_patcher::{ConfigField, HookConfigMeta, HookProject, Patcher, TargetApp};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,36 @@ fn main() -> Result<()> {
     let target = TargetApp::from_args(&args);
     let project_root = project_root();
 
+    let config_meta = HookConfigMeta::new(
+        "zed-prj-workspace-hook.json",
+        r#"{"enabled":true,"log_level":"info","sync_delay_ms":300,"sync_cooldown_ms":1000,"discovery_cooldown_s":30}"#,
+    )
+    .with_field(
+        ConfigField::new("enabled", "Master enable/disable toggle")
+            .with_options(&["true", "false"])
+            .with_default("true"),
+    )
+    .with_field(
+        ConfigField::new("log_level", "Tracing filter level")
+            .with_options(&["trace", "debug", "info", "warn", "error"])
+            .with_default("info"),
+    )
+    .with_field(
+        ConfigField::new("sync_delay_ms", "Delay (ms) after workspace write before querying DB (must be >200)")
+            .with_default("300"),
+    )
+    .with_field(
+        ConfigField::new("sync_cooldown_ms", "Minimum interval (ms) between sync operations per workspace")
+            .with_default("1000"),
+    )
+    .with_field(
+        ConfigField::new("discovery_cooldown_s", "Minimum interval (s) between discovery retries on failure")
+            .with_default("30"),
+    );
+
     let project = HookProject::new("zed-prj-workspace-hook", "libzed_prj_workspace_hook.dylib")
         .with_crate_name("zed-prj-workspace-hook")
+        .with_config(config_meta)
         .with_registry_entry(
             HookEntry::new("zed-prj-workspace-hook", "")
                 .with_version(env!("CARGO_PKG_VERSION"))

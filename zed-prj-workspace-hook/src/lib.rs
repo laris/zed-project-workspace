@@ -28,25 +28,35 @@ use std::sync::OnceLock;
 static GUM: OnceLock<Gum> = OnceLock::new();
 static INIT_ONCE: std::sync::Once = std::sync::Once::new();
 
+/// Global config, set once during init, readable from sync threads.
+pub(crate) static CONFIG: OnceLock<config::SyncConfig> = OnceLock::new();
+
 #[ctor]
 fn init() {
     INIT_ONCE.call_once(init_inner);
 }
 
 fn init_inner() {
-    let cfg = config::SyncConfig::from_env();
+    let app_id = config::detect_app_id();
+    let cfg = config::SyncConfig::load(&app_id);
 
-    logging::init();
+    logging::init(&cfg.log_level);
 
     tracing::info!("=== zed-prj-workspace-hook v{} ===", env!("CARGO_PKG_VERSION"));
     tracing::info!("PID: {}", std::process::id());
     tracing::info!("Executable: {:?}", std::env::current_exe().unwrap_or_default());
     tracing::info!("Config: {:?}", cfg);
+    if let Some(path) = config::config_path(&app_id) {
+        tracing::info!("Config file: {}", path.display());
+    }
 
     if !cfg.enabled {
-        tracing::info!("Sync disabled via ZED_PRJ_WORKSPACE_SYNC=0");
+        let _ = CONFIG.set(cfg);
+        tracing::info!("Sync disabled (enabled=false)");
         return;
     }
+
+    let _ = CONFIG.set(cfg);
 
     // Find Zed's DB path once at startup
     discovery::init_db_path();

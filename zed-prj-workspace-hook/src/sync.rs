@@ -15,7 +15,18 @@ use std::time::Instant;
 
 use zed_prj_workspace::{lock, mapping::WorkspaceMapping, workspace_db, workspace_file};
 
-use crate::config::{DISCOVERY_COOLDOWN, SYNC_COOLDOWN, SYNC_DELAY};
+use crate::CONFIG;
+use std::time::Duration;
+
+fn sync_delay() -> Duration {
+    CONFIG.get().map(|c| c.sync_delay()).unwrap_or(Duration::from_millis(300))
+}
+fn sync_cooldown() -> Duration {
+    CONFIG.get().map(|c| c.sync_cooldown()).unwrap_or(Duration::from_millis(1000))
+}
+fn discovery_cooldown() -> Duration {
+    CONFIG.get().map(|c| c.discovery_cooldown()).unwrap_or(Duration::from_secs(30))
+}
 use crate::discovery;
 use crate::hooks::sqlite3_prepare::{TARGET_PENDING, TARGET_SET, TARGET_STATE};
 
@@ -49,10 +60,10 @@ pub fn on_workspace_write_detected(_sql: &str, state: u8) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
         .is_ok()
     {
-        tracing::debug!("Spawning sync thread (delay={}ms)", SYNC_DELAY.as_millis());
+        tracing::debug!("Spawning sync thread (delay={}ms)", sync_delay().as_millis());
         std::thread::spawn(move || {
             // Wait for the transaction to commit
-            std::thread::sleep(SYNC_DELAY);
+            std::thread::sleep(sync_delay());
 
             // If discovery hasn't happened yet, do it now
             if state == TARGET_PENDING {
@@ -111,7 +122,7 @@ pub fn enqueue_workspace_sync(workspace_id: i64) {
 /// Drain the sync queue: process each workspace_id sequentially.
 fn drain_sync_queue() {
     // Initial delay: wait for Zed's transaction to commit
-    std::thread::sleep(SYNC_DELAY);
+    std::thread::sleep(sync_delay());
 
     loop {
         let workspace_id = {
@@ -154,7 +165,7 @@ fn process_workspace_sync(workspace_id: i64) {
         let mut map = DEBOUNCE_MAP.lock().unwrap();
         let map = map.get_or_insert_with(HashMap::new);
         if let Some(last) = map.get(&workspace_id) {
-            if last.elapsed() < SYNC_COOLDOWN {
+            if last.elapsed() < sync_cooldown() {
                 tracing::debug!(
                     "Per-workspace cooldown active for workspace_id={}, skipping",
                     workspace_id
@@ -226,7 +237,7 @@ fn run_discovery() {
     let last_discovery_ms = discovery::LAST_DISCOVERY_MS.load(Ordering::Relaxed);
     if last_discovery_ms > 0 {
         let elapsed_ms = epoch_ms().saturating_sub(last_discovery_ms);
-        if elapsed_ms < DISCOVERY_COOLDOWN.as_millis() as u64 {
+        if elapsed_ms < discovery_cooldown().as_millis() as u64 {
             tracing::debug!("Discovery cooldown active, skipping");
             SYNC_PENDING.store(false, Ordering::Release);
             return;
@@ -255,13 +266,13 @@ fn run_discovery() {
         Ok(None) => {
             tracing::info!(
                 "No workspace file found — will retry after {}s cooldown",
-                DISCOVERY_COOLDOWN.as_secs()
+                discovery_cooldown().as_secs()
             );
         }
         Err(e) => {
             tracing::warn!(
                 "Discovery failed: {e} — will retry after {}s cooldown",
-                DISCOVERY_COOLDOWN.as_secs()
+                discovery_cooldown().as_secs()
             );
         }
     }
@@ -286,7 +297,7 @@ fn run_sync() {
         let mut map = DEBOUNCE_MAP.lock().unwrap();
         let map = map.get_or_insert_with(HashMap::new);
         if let Some(last) = map.get(&workspace_id)
-            && last.elapsed() < SYNC_COOLDOWN {
+            && last.elapsed() < sync_cooldown() {
                 tracing::debug!(
                     "Per-workspace cooldown active for workspace_id={}, skipping",
                     workspace_id
