@@ -202,11 +202,11 @@ pub fn try_deferred_picker_install(target_name: &str) {
 }
 
 /// Register this hook in the shared hook registry.
+///
+/// Uses `locked_register` to avoid race conditions when multiple Zed processes
+/// load their `#[ctor]` functions concurrently.
 fn register_in_registry(app_id: &str) {
     use dylib_hook_registry::{HookEntry, HookRegistry};
-
-    let mut registry = HookRegistry::load(app_id).unwrap_or_default();
-    registry.app_id = Some(app_id.to_string());
 
     let dylib_path = format!(
         "{}/target/release/libzed_prj_workspace_hook.dylib",
@@ -221,11 +221,8 @@ fn register_in_registry(app_id: &str) {
         .with_symbol("OpenFolderEntry_sort_comparator", "replace", "Pin target folder to top of project picker")
         .with_load_order(2);
 
-    registry.register(entry);
-
-    if let Err(e) = registry.save(app_id) {
-        tracing::debug!("Could not save hook registry: {} (non-fatal)", e);
-    } else {
-        tracing::info!("Registered in hook registry (app_id={})", app_id);
+    match HookRegistry::locked_register(app_id, entry) {
+        Ok(()) => tracing::info!("Registered in hook registry (app_id={})", app_id),
+        Err(e) => tracing::debug!("Could not save hook registry: {} (non-fatal)", e),
     }
 }
