@@ -6,6 +6,6 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-dylib-patcher = { path = "../../dylib-kit/crates/dylib-patcher" }
-dylib-hook-registry = { path = "../../dylib-kit/crates/dylib-hook-registry" }
+dylib-patcher = { git = "https://github.com/laris/dylib-kit" }
+dylib-hook-registry = { git = "https://github.com/laris/dylib-kit" }
 serde_json = "1"

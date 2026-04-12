@@ -1,26 +1,46 @@
 //! Hook for the project picker sort in `get_open_folders()`.
 //!
-//! Hooks `insertion_sort_shift_left<OpenFolderEntry, ...>` — the sort function
-//! used for arrays with < 20 elements (which covers typical workspace sizes).
+//! Hooks the sort function used for `OpenFolderEntry` arrays in the recent
+//! projects picker. Zed calls `[T]::sort_by()` which dispatches to the Rust
+//! standard library's stable sort implementation.
 //!
-//! The inlined sort logic in `get_open_folders` has a threshold at 20 elements:
-//! - < 20 elements: calls `insertion_sort_shift_left` directly
-//! - >= 20 elements: calls `driftsort_main`
+//! ## Symbol history
 //!
-//! This hook intercepts the insertion sort, lets it complete normally
-//! (alphabetical by name), then scans the sorted slice to move the target
-//! folder to the front.
+//! | Zed version | Sort function | Symbol pattern |
+//! |-------------|--------------|----------------|
+//! | v0.228–v0.231 | `insertion_sort_shift_left` | `["insertion_sort_shift_left", "get_open_folders", "OpenFolderEntry"]` |
+//! | v0.232+ | `driftsort_main` | `["driftsort_main", "get_open_folders", "OpenFolderEntry"]` |
 //!
-//! Layout (confirmed by disassembly):
-//! - `sizeof(OpenFolderEntry)` = 0x58 (88 bytes)
+//! The change is due to Rust's standard library updating its stable sort
+//! algorithm. The function signature also changed:
+//!
+//! - Old: `insertion_sort_shift_left(data, len, offset, is_less)` — x0,x1,x2,x3
+//! - New: `driftsort_main(data, len, is_less, scratch)` — x0,x1,x2,x3
+//!
+//! Our detour only uses `data` (x0) and `len` (x1) for the pin-to-front logic,
+//! so the remaining args are simply forwarded to the original function.
+//!
+//! ## Layout (confirmed by disassembly of v0.230.0 and v0.232.0)
+//!
+//! - `sizeof(OpenFolderEntry)` = 0x58 (88 bytes) — confirmed by `mov w9, #0x58`
 //! - `name: SharedString` is at offset 0 (compiler reordered to first field)
 
 use frida_gum::{NativePointer, interceptor::Interceptor};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-/// Symbol search patterns for `insertion_sort_shift_left<OpenFolderEntry, ...>`.
+/// Symbol search patterns for the sort function used on `OpenFolderEntry`.
+///
+/// Since v0.232.0, Rust's stable sort uses `driftsort_main` instead of
+/// `insertion_sort_shift_left`. We try both patterns, preferring the newer one.
 pub const SYMBOL_INCLUDE: &[&str] = &[
+    "driftsort_main",
+    "get_open_folders",
+    "OpenFolderEntry",
+];
+
+/// Fallback pattern for older Zed versions (v0.228–v0.231).
+pub const SYMBOL_INCLUDE_LEGACY: &[&str] = &[
     "insertion_sort_shift_left",
     "get_open_folders",
     "OpenFolderEntry",
@@ -34,8 +54,9 @@ const ENTRY_SIZE: usize = 0x58;
 
 /// Original function pointer type.
 ///
-/// ARM64 Rust ABI for `insertion_sort_shift_left(v: &mut [T], offset: usize, is_less: &mut F)`:
-/// x0=data, x1=len, x2=offset, x3=is_less
+/// Works for both sort variants (args after x0/x1 are just forwarded):
+/// - insertion_sort_shift_left: x0=data, x1=len, x2=offset, x3=is_less
+/// - driftsort_main:            x0=data, x1=len, x2=is_less, x3=scratch
 type SortFn = unsafe extern "C" fn(*mut u8, usize, usize, *mut c_void);
 
 /// Saved original function pointer — set once at install time.
@@ -69,7 +90,7 @@ pub fn install(interceptor: &mut Interceptor, fn_ptr: NativePointer) {
         ORIG_FN.store(original.0, Ordering::Release);
     }
 
-    tracing::info!("Hook installed: picker_sort (insertion_sort_shift_left for OpenFolderEntry)");
+    tracing::info!("Hook installed: picker_sort (sort detour for OpenFolderEntry)");
 }
 
 /// Read the `name: SharedString` field from an OpenFolderEntry pointer.
@@ -179,9 +200,11 @@ unsafe fn pin_target_to_front(data: *mut u8, len: usize) {
     );
 }
 
-/// Detour for `insertion_sort_shift_left<OpenFolderEntry, ...>`.
+/// Detour for the OpenFolderEntry sort function.
 ///
-/// Calls the original sort, then post-processes to pin the target folder at front.
+/// Works with both `insertion_sort_shift_left` (v0.228–v0.231) and
+/// `driftsort_main` (v0.232+). Calls the original sort, then post-processes
+/// to pin the target folder at front.
 unsafe extern "C" fn sort_detour(
     data: *mut u8,
     len: usize,

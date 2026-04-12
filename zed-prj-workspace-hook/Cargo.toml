@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 zed-prj-workspace = { path = ".." }
-dylib-hook-registry = { path = "../../dylib-kit/crates/dylib-hook-registry" }
+dylib-hook-registry = { git = "https://github.com/laris/dylib-kit" }
 frida-gum = { git = "https://github.com/frida/frida-rust", features = ["auto-download", "invocation-listener"] }
 ctor = "0.6"
 libc = "0.2"

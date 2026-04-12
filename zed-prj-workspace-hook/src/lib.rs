@@ -110,17 +110,25 @@ fn init_inner() {
     }
 
     // Find the project picker sort comparator (optional — Layer 4)
+    // Try driftsort_main first (v0.232+), then insertion_sort_shift_left (v0.228–v0.231)
     let picker_sort_ptr = symbols::find_by_pattern(
         &main_module,
         hooks::picker_sort::SYMBOL_INCLUDE,
         hooks::picker_sort::SYMBOL_EXCLUDE,
-    );
-    if let Some((ref name, ref ptr)) = picker_sort_ptr {
-        tracing::info!("Found picker sort driftsort_main: {} at {:?}", name, ptr);
+    ).or_else(|| {
+        tracing::info!("driftsort_main not found, trying legacy insertion_sort_shift_left...");
+        symbols::find_by_pattern(
+            &main_module,
+            hooks::picker_sort::SYMBOL_INCLUDE_LEGACY,
+            hooks::picker_sort::SYMBOL_EXCLUDE,
+        )
+    });
+    if let Some((ref name, ref _ptr)) = picker_sort_ptr {
+        tracing::info!("Found picker sort function: {} at {:?}", name, _ptr);
     } else {
         tracing::warn!(
-            "Cannot find driftsort_main<OpenFolderEntry> — project picker pinning will NOT work \
-             (picker will remain alphabetical)"
+            "Cannot find sort<OpenFolderEntry> (tried driftsort_main and insertion_sort_shift_left) \
+             — project picker pinning will NOT work (picker will remain alphabetical)"
         );
     }
 
